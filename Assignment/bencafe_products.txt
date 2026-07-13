@@ -1,0 +1,5 @@
+Cappuccino|4.5
+Latte|4.5
+Espresso|4.0
+Green Tea|5.0
+Cheese Cake|4.0
