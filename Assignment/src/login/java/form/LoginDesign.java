@@ -203,11 +203,11 @@ public class LoginDesign extends JFrame {
 
 	        buttonLogin.addActionListener(new ActionListener() {
 	            public void actionPerformed(ActionEvent e) {
-	                String username = txtUser.getText();
+	                String username = txtUser.getText().trim();
 	                String password = new String(txtPass.getPassword());
 
 	                boolean isValid = false;
-	                String sql = "SELECT * FROM javalogin WHERE Username = ? AND Password = ?";
+	                String sql = "SELECT * FROM tblUser WHERE username=? AND password=? AND status='Active'";
 
 	                try (java.sql.Connection conn = DBConnection.getConnection();
 	                     java.sql.PreparedStatement stmt = conn.prepareStatement(sql)) {

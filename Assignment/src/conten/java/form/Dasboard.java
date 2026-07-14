@@ -13,12 +13,6 @@ import java.awt.event.FocusEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.GeneralPath;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -49,10 +43,8 @@ public class Dasboard extends JFrame {
 
     private static final String SEARCH_PLACEHOLDER = "Search anything...";
 
-    // Where the real order/product data is persisted between runs of the app - plain text files
-    // so you can open them directly and see exactly what's been saved.
-    private static final String ORDERS_FILE = "bencafe_orders.txt";
-    private static final String PRODUCTS_FILE = "bencafe_products.txt";
+    // MySQL (ben_cafedb) is now the single source of truth for orders and products.
+    private final Dabmager db = new Dabmager();
 
     // ---- Live state ----
     private JTextField searchField;
@@ -83,12 +75,21 @@ public class Dasboard extends JFrame {
 
     // ---- Persistent order data - the single source of truth for everything shown on the dashboard ----
     private List<Order> allOrders = new ArrayList<>();
-    private int nextOrderId = 1;
 
     // "All Orders" window (kept alive so it can be refreshed live from anywhere new data is entered)
     private JDialog allOrdersDialog;
     private DefaultTableModel allOrdersModel;
     private TableRowSorter<DefaultTableModel> allOrdersSorter;
+
+    // "All Products" window (same idea, for the Top Selling Products "View All")
+    private JDialog allProductsDialog;
+    private DefaultTableModel allProductsModel;
+    private TableRowSorter<DefaultTableModel> allProductsSorter;
+
+    // "All Customers" window (same idea, for the Recent Customers "View All")
+    private JDialog allCustomersDialog;
+    private DefaultTableModel allCustomersModel;
+    private TableRowSorter<DefaultTableModel> allCustomersSorter;
 
     public Dasboard() {
         setTitle("Ben Cafe - Management System");
@@ -105,6 +106,13 @@ public class Dasboard extends JFrame {
 
         initProductCatalog();
         loadData();
+        if (!db.testConnection()) {
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    "Could not connect to the MySQL database (ben_cafedb).\n" +
+                    "Check the URL / username / password at the top of DBManager.java.\n" +
+                    "The app will still open, but nothing will be saved until this is fixed.",
+                    "Database Connection", JOptionPane.WARNING_MESSAGE));
+        }
 
         JPanel root = new JPanel(new BorderLayout());
         root.setBackground(BG);
@@ -124,114 +132,19 @@ public class Dasboard extends JFrame {
         productPrices.put("Cheese Cake", 4.00);
     }
 
-    // ---------------- DATA PERSISTENCE (plain .txt files) ----------------
-    // All orders entered by Admin/Staff, and every product saved to the menu, are written to
-    // simple pipe-delimited .txt files so Total Sales, Total Orders, Total Customers, Top
-    // Products, Recent Customers and the Sales Overview chart are always built from real, saved
-    // data - and that data survives app restarts because it's read back in on startup.
+    // ---------------- DATA PERSISTENCE (MySQL) ----------------
+    // Orders and products both live in MySQL now (ben_cafedb). Every add/edit/delete/status-toggle
+    // below writes straight to the database via DBManager, so Total Sales, Total Orders, Total
+    // Customers, Top Products, Recent Customers and the Sales Overview chart are always built
+    // from real, saved data - and it survives restarts because MySQL lives outside the app.
 
     private void loadData() {
-        loadProducts();
-        loadOrders();
-    }
-
-    private void saveData() {
-        saveOrders();
-        saveProducts();
-    }
-
-    /** bencafe_orders.txt format: first line = nextOrderId, then one order per line, pipe-delimited:
-     *  orderId|customer|product|qty|status|total|date|createdAt */
-    private void loadOrders() {
-        allOrders = new ArrayList<>();
-        nextOrderId = 1;
-        File f = new File(ORDERS_FILE);
-        if (!f.exists()) return;
-        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
-            String line;
-            boolean firstLine = true;
-            while ((line = br.readLine()) != null) {
-                if (line.trim().isEmpty()) continue;
-                if (firstLine) {
-                    firstLine = false;
-                    try { nextOrderId = Integer.parseInt(line.trim()); } catch (NumberFormatException ignored) { }
-                    continue;
-                }
-                String[] p = line.split("\\|", -1);
-                if (p.length < 8) continue;
-                try {
-                    Order o = new Order(p[0], unescape(p[1]), unescape(p[2]), Integer.parseInt(p[3]),
-                            p[4], Double.parseDouble(p[5]), LocalDate.parse(p[6]), LocalDateTime.parse(p[7]));
-                    allOrders.add(o);
-                } catch (Exception ex) {
-                    // skip any malformed/corrupted line instead of crashing the whole load
-                }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void saveOrders() {
-        try (PrintWriter pw = new PrintWriter(new FileWriter(ORDERS_FILE))) {
-            pw.println(nextOrderId);
-            for (Order o : allOrders) {
-                pw.println(String.join("|",
-                        o.orderId,
-                        escape(o.customer),
-                        escape(o.product),
-                        String.valueOf(o.qty),
-                        o.status,
-                        String.valueOf(o.total),
-                        o.date.toString(),
-                        o.createdAt.toString()));
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    /** bencafe_products.txt format: one product per line, pipe-delimited: name|price */
-    private void loadProducts() {
-        File f = new File(PRODUCTS_FILE);
-        if (!f.exists()) return; // no saved menu yet - keep the built-in defaults
-        Map<String, Double> loaded = new LinkedHashMap<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.trim().isEmpty()) continue;
-                String[] p = line.split("\\|", -1);
-                if (p.length < 2) continue;
-                try {
-                    loaded.put(unescape(p[0]), Double.parseDouble(p[1]));
-                } catch (NumberFormatException ignored) { }
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        if (!loaded.isEmpty()) {
+        Map<String, Double> loadedProducts = db.loadProducts();
+        if (loadedProducts != null && !loadedProducts.isEmpty()) {
             productPrices.clear();
-            productPrices.putAll(loaded);
+            productPrices.putAll(loadedProducts);
         }
-    }
-
-    private void saveProducts() {
-        try (PrintWriter pw = new PrintWriter(new FileWriter(PRODUCTS_FILE))) {
-            for (Map.Entry<String, Double> en : productPrices.entrySet()) {
-                pw.println(escape(en.getKey()) + "|" + en.getValue());
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    /** Keeps a stray "|" in a name/customer from corrupting the pipe-delimited line format. */
-    private String escape(String s) {
-        return s == null ? "" : s.replace("|", "/");
-    }
-
-    private String unescape(String s) {
-        return s == null ? "" : s;
+        allOrders = db.loadOrders();
     }
 
     /** Central refresh: call after ANY data change so every panel reflects the persisted orders. */
@@ -242,6 +155,8 @@ public class Dasboard extends JFrame {
         refreshChart();
         updateStats();
         refreshAllOrdersWindowIfOpen();
+        refreshAllProductsWindowIfOpen();
+        refreshAllCustomersWindowIfOpen();
     }
 
     private Order findOrderById(String id) {
@@ -259,8 +174,9 @@ public class Dasboard extends JFrame {
      */
     private boolean addProduct(String name, double price) {
         if (name == null || name.trim().isEmpty() || price <= 0) return false;
-        productPrices.put(name.trim(), price);
-        saveData();
+        String trimmed = name.trim();
+        if (!db.saveProduct(trimmed, price)) return false;
+        productPrices.put(trimmed, price);
         return true;
     }
 
@@ -820,8 +736,13 @@ public class Dasboard extends JFrame {
                 String orderId = String.valueOf(ordersModel.getValueAt(modelRow, 0));
                 Order o = findOrderById(orderId);
                 if (o == null) return;
-                o.status = o.status.equalsIgnoreCase("Paid") ? "Pending" : "Paid";
-                saveData();
+                String newStatus = o.status.equalsIgnoreCase("Paid") ? "Pending" : "Paid";
+                if (!db.updateOrderStatus(orderId, newStatus)) {
+                    JOptionPane.showMessageDialog(Dasboard.this, "Could not update status in the database.",
+                            "Database Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                o.status = newStatus;
                 refreshEverything();
             }
 
@@ -902,10 +823,15 @@ public class Dasboard extends JFrame {
         double total = price * qty;
 
         LocalDateTime now = LocalDateTime.now();
-        String orderId = "#" + (nextOrderId++);
+        int generatedId = db.insertOrder(customer, product, qty, status, price, total, now);
+        if (generatedId <= 0) {
+            JOptionPane.showMessageDialog(this, "Could not save the order to the database.",
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        String orderId = "#" + generatedId;
         Order order = new Order(orderId, customer, product, qty, status, total, now.toLocalDate(), now);
         allOrders.add(order);
-        saveData();
 
         // If we're not currently looking at today, jump back to today so the new order is visible.
         selectedDate = LocalDate.now();
@@ -959,14 +885,26 @@ public class Dasboard extends JFrame {
                 JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (result != JOptionPane.OK_OPTION) return;
 
-        String customer = customerField.getText().trim();
-        o.customer = customer.isEmpty() ? "Guest" : customer;
-        o.product = (String) productCombo.getSelectedItem();
-        o.qty = (Integer) qtySpinner.getValue();
-        o.status = (String) statusCombo.getSelectedItem();
-        o.total = productPrices.getOrDefault(o.product, 0.0) * o.qty;
+        String newCustomer = customerField.getText().trim();
+        if (newCustomer.isEmpty()) newCustomer = "Guest";
+        String newProduct = (String) productCombo.getSelectedItem();
+        int newQty = (Integer) qtySpinner.getValue();
+        String newStatus = (String) statusCombo.getSelectedItem();
+        double pricePerUnit = productPrices.getOrDefault(newProduct, 0.0);
+        double newTotal = pricePerUnit * newQty;
 
-        saveData();
+        if (!db.updateOrder(o.orderId, newCustomer, newProduct, newQty, newStatus, pricePerUnit, newTotal)) {
+            JOptionPane.showMessageDialog(this, "Could not update the order in the database.",
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        o.customer = newCustomer;
+        o.product = newProduct;
+        o.qty = newQty;
+        o.status = newStatus;
+        o.total = newTotal;
+
         refreshEverything();
     }
 
@@ -977,8 +915,13 @@ public class Dasboard extends JFrame {
                 "Confirm Delete", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (result != JOptionPane.YES_OPTION) return;
 
+        if (!db.deleteOrder(orderId)) {
+            JOptionPane.showMessageDialog(this, "Could not delete the order from the database.",
+                    "Database Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
         allOrders.removeIf(o -> o.orderId.equals(orderId));
-        saveData();
         refreshEverything();
     }
 
@@ -1077,8 +1020,13 @@ public class Dasboard extends JFrame {
                 String orderId = String.valueOf(allOrdersModel.getValueAt(modelRow, 1));
                 Order o = findOrderById(orderId);
                 if (o == null) return;
-                o.status = o.status.equalsIgnoreCase("Paid") ? "Pending" : "Paid";
-                saveData();
+                String newStatus = o.status.equalsIgnoreCase("Paid") ? "Pending" : "Paid";
+                if (!db.updateOrderStatus(orderId, newStatus)) {
+                    JOptionPane.showMessageDialog(allOrdersDialog, "Could not update status in the database.",
+                            "Database Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                o.status = newStatus;
                 refreshEverything();
             }
 
@@ -1137,6 +1085,258 @@ public class Dasboard extends JFrame {
                     o.date.format(DateTimeFormatter.ofPattern("MMM d, yyyy")),
                     o.orderId, o.customer, o.product, String.valueOf(o.qty), o.status,
                     String.format("$%.2f", o.total)
+            });
+        }
+    }
+
+    // ---------------- ALL PRODUCTS WINDOW ----------------
+    /**
+     * Opens a separate window - styled the same way as the Today's Orders / All Orders card -
+     * showing every product on the menu with units sold and revenue, with search and click-to-sort.
+     */
+    private void showAllProductsWindow() {
+        if (allProductsDialog != null && allProductsDialog.isDisplayable()) {
+            refreshAllProductsWindowIfOpen();
+            allProductsDialog.setVisible(true);
+            allProductsDialog.toFront();
+            return;
+        }
+
+        allProductsDialog = new JDialog(this, "All Products - Ben Cafe", false);
+        allProductsDialog.setSize(750, 560);
+        allProductsDialog.setLocationRelativeTo(this);
+        allProductsDialog.getContentPane().setBackground(BG);
+        allProductsDialog.setLayout(new BorderLayout());
+
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.setBackground(BG);
+        wrapper.setBorder(new EmptyBorder(20, 20, 20, 20));
+
+        RoundedPanel card = new RoundedPanel(16, CARD_BG);
+        card.setLayout(new BorderLayout());
+        card.setBorder(new EmptyBorder(18, 18, 18, 18));
+
+        JPanel header = new JPanel(new BorderLayout());
+        header.setOpaque(false);
+        JLabel title = new JLabel("All Products");
+        title.setFont(new Font("SansSerif", Font.BOLD, 15));
+
+        JTextField searchProducts = new JTextField();
+        searchProducts.setPreferredSize(new Dimension(200, 34));
+        searchProducts.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(BORDER, 1, true), new EmptyBorder(6, 12, 6, 12)));
+
+        JButton addProductBtn = pillButton("+ Add Product");
+        addProductBtn.addActionListener(e -> showAddProductDialog());
+
+        JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        headerButtons.setOpaque(false);
+        headerButtons.add(searchProducts);
+        headerButtons.add(addProductBtn);
+
+        header.add(title, BorderLayout.WEST);
+        header.add(headerButtons, BorderLayout.EAST);
+
+        String[] cols = {"Product", "Price", "Units Sold", "Revenue"};
+        allProductsModel = new DefaultTableModel(cols, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+        JTable allProductsTable = new JTable(allProductsModel);
+        allProductsTable.setRowHeight(32);
+        allProductsTable.setShowGrid(false);
+        allProductsTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        allProductsTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
+        allProductsTable.getTableHeader().setForeground(TEXT_GRAY);
+        allProductsTable.setSelectionBackground(BG);
+
+        allProductsSorter = new TableRowSorter<>(allProductsModel);
+        allProductsTable.setRowSorter(allProductsSorter);
+
+        searchProducts.getDocument().addDocumentListener(new DocumentListener() {
+            public void insertUpdate(DocumentEvent e) { filter(); }
+            public void removeUpdate(DocumentEvent e) { filter(); }
+            public void changedUpdate(DocumentEvent e) { filter(); }
+            private void filter() {
+                String text = searchProducts.getText().trim();
+                if (text.isEmpty()) { allProductsSorter.setRowFilter(null); return; }
+                try {
+                    allProductsSorter.setRowFilter(RowFilter.regexFilter("(?i)" + java.util.regex.Pattern.quote(text)));
+                } catch (Exception ex) {
+                    allProductsSorter.setRowFilter(null);
+                }
+            }
+        });
+
+        allProductsTable.setToolTipText("Click a column header to sort.");
+
+        JScrollPane sp = new JScrollPane(allProductsTable);
+        sp.setBorder(null);
+        sp.setOpaque(false);
+        sp.getViewport().setOpaque(false);
+
+        card.add(header, BorderLayout.NORTH);
+        card.add(sp, BorderLayout.CENTER);
+        wrapper.add(card, BorderLayout.CENTER);
+        allProductsDialog.add(wrapper, BorderLayout.CENTER);
+
+        refreshAllProductsWindowIfOpen();
+        allProductsDialog.setVisible(true);
+    }
+
+    /** Keeps the All Products window (if currently open) in sync with every real order and the menu. */
+    private void refreshAllProductsWindowIfOpen() {
+        if (allProductsModel == null) return;
+        allProductsModel.setRowCount(0);
+
+        Map<String, Integer> unitsSold = new LinkedHashMap<>();
+        Map<String, Double> revenue = new LinkedHashMap<>();
+        for (Order o : allOrders) {
+            unitsSold.merge(o.product, o.qty, Integer::sum);
+            if (o.status.equalsIgnoreCase("Paid")) {
+                revenue.merge(o.product, o.total, Double::sum);
+            }
+        }
+
+        List<String> productNames = new ArrayList<>(productPrices.keySet());
+        for (String p : unitsSold.keySet()) {
+            if (!productNames.contains(p)) productNames.add(p);
+        }
+        productNames.sort((a, b) -> unitsSold.getOrDefault(b, 0) - unitsSold.getOrDefault(a, 0));
+
+        for (String name : productNames) {
+            double price = productPrices.getOrDefault(name, 0.0);
+            int sold = unitsSold.getOrDefault(name, 0);
+            double rev = revenue.getOrDefault(name, 0.0);
+            allProductsModel.addRow(new Object[]{name, String.format("$%.2f", price), sold, String.format("$%.2f", rev)});
+        }
+    }
+
+    // ---------------- ALL CUSTOMERS WINDOW ----------------
+    /**
+     * Opens a separate window - styled the same way as the Today's Orders / All Orders card -
+     * showing every customer who ever ordered, with order count, total spent, and last order time.
+     */
+    private void showAllCustomersWindow() {
+        if (allCustomersDialog != null && allCustomersDialog.isDisplayable()) {
+            refreshAllCustomersWindowIfOpen();
+            allCustomersDialog.setVisible(true);
+            allCustomersDialog.toFront();
+            return;
+        }
+
+        allCustomersDialog = new JDialog(this, "All Customers - Ben Cafe", false);
+        allCustomersDialog.setSize(750, 560);
+        allCustomersDialog.setLocationRelativeTo(this);
+        allCustomersDialog.getContentPane().setBackground(BG);
+        allCustomersDialog.setLayout(new BorderLayout());
+
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.setBackground(BG);
+        wrapper.setBorder(new EmptyBorder(20, 20, 20, 20));
+
+        RoundedPanel card = new RoundedPanel(16, CARD_BG);
+        card.setLayout(new BorderLayout());
+        card.setBorder(new EmptyBorder(18, 18, 18, 18));
+
+        JPanel header = new JPanel(new BorderLayout());
+        header.setOpaque(false);
+        JLabel title = new JLabel("All Customers");
+        title.setFont(new Font("SansSerif", Font.BOLD, 15));
+
+        JTextField searchCustomers = new JTextField();
+        searchCustomers.setPreferredSize(new Dimension(220, 34));
+        searchCustomers.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(BORDER, 1, true), new EmptyBorder(6, 12, 6, 12)));
+
+        JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        headerButtons.setOpaque(false);
+        headerButtons.add(searchCustomers);
+
+        header.add(title, BorderLayout.WEST);
+        header.add(headerButtons, BorderLayout.EAST);
+
+        String[] cols = {"Customer", "Orders", "Total Spent", "Last Order"};
+        allCustomersModel = new DefaultTableModel(cols, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+        JTable allCustomersTable = new JTable(allCustomersModel);
+        allCustomersTable.setRowHeight(32);
+        allCustomersTable.setShowGrid(false);
+        allCustomersTable.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        allCustomersTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 12));
+        allCustomersTable.getTableHeader().setForeground(TEXT_GRAY);
+        allCustomersTable.setSelectionBackground(BG);
+
+        allCustomersSorter = new TableRowSorter<>(allCustomersModel);
+        allCustomersTable.setRowSorter(allCustomersSorter);
+
+        searchCustomers.getDocument().addDocumentListener(new DocumentListener() {
+            public void insertUpdate(DocumentEvent e) { filter(); }
+            public void removeUpdate(DocumentEvent e) { filter(); }
+            public void changedUpdate(DocumentEvent e) { filter(); }
+            private void filter() {
+                String text = searchCustomers.getText().trim();
+                if (text.isEmpty()) { allCustomersSorter.setRowFilter(null); return; }
+                try {
+                    allCustomersSorter.setRowFilter(RowFilter.regexFilter("(?i)" + java.util.regex.Pattern.quote(text)));
+                } catch (Exception ex) {
+                    allCustomersSorter.setRowFilter(null);
+                }
+            }
+        });
+
+        allCustomersTable.setToolTipText("Click a column header to sort.");
+
+        JScrollPane sp = new JScrollPane(allCustomersTable);
+        sp.setBorder(null);
+        sp.setOpaque(false);
+        sp.getViewport().setOpaque(false);
+
+        card.add(header, BorderLayout.NORTH);
+        card.add(sp, BorderLayout.CENTER);
+        wrapper.add(card, BorderLayout.CENTER);
+        allCustomersDialog.add(wrapper, BorderLayout.CENTER);
+
+        refreshAllCustomersWindowIfOpen();
+        allCustomersDialog.setVisible(true);
+    }
+
+    /** Keeps the All Customers window (if currently open) in sync with every real order. */
+    private void refreshAllCustomersWindowIfOpen() {
+        if (allCustomersModel == null) return;
+        allCustomersModel.setRowCount(0);
+
+        // Group by lower-cased name (so "Emily" and "emily" merge) but keep the first-seen display casing.
+        Map<String, String> displayNames = new LinkedHashMap<>();
+        Map<String, Integer> orderCounts = new LinkedHashMap<>();
+        Map<String, Double> totalSpent = new LinkedHashMap<>();
+        Map<String, LocalDateTime> lastOrder = new LinkedHashMap<>();
+
+        for (Order o : allOrders) {
+            String key = o.customer.trim().toLowerCase(Locale.ROOT);
+            displayNames.putIfAbsent(key, o.customer.trim());
+            orderCounts.merge(key, 1, Integer::sum);
+            if (o.status.equalsIgnoreCase("Paid")) {
+                totalSpent.merge(key, o.total, Double::sum);
+            } else {
+                totalSpent.putIfAbsent(key, 0.0);
+            }
+            LocalDateTime prev = lastOrder.get(key);
+            if (prev == null || o.createdAt.isAfter(prev)) {
+                lastOrder.put(key, o.createdAt);
+            }
+        }
+
+        List<String> keys = new ArrayList<>(displayNames.keySet());
+        keys.sort((a, b) -> lastOrder.get(b).compareTo(lastOrder.get(a)));
+
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MMM d, yyyy hh:mm a");
+        for (String key : keys) {
+            allCustomersModel.addRow(new Object[]{
+                    displayNames.get(key),
+                    orderCounts.getOrDefault(key, 0),
+                    String.format("$%.2f", totalSpent.getOrDefault(key, 0.0)),
+                    lastOrder.get(key).format(fmt)
             });
         }
     }
@@ -1257,16 +1457,7 @@ public class Dasboard extends JFrame {
         addProductBtn.addActionListener(e -> showAddProductDialog());
 
         JButton viewAll = pillButton("View All");
-        viewAll.addActionListener(e -> {
-            List<Order> sorted = new ArrayList<>(allOrders);
-            sorted.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
-            StringBuilder sb = new StringBuilder();
-            for (Order o : sorted) {
-                sb.append(o.product).append(" - ").append(o.qty).append(" sold (order ").append(o.orderId).append(")\n");
-            }
-            String msg = sb.length() == 0 ? "No product sales yet." : sb.toString();
-            JOptionPane.showMessageDialog(this, msg, "All Product Sales", JOptionPane.INFORMATION_MESSAGE);
-        });
+        viewAll.addActionListener(e -> showAllProductsWindow());
 
         JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         headerButtons.setOpaque(false);
@@ -1356,17 +1547,7 @@ public class Dasboard extends JFrame {
         JLabel title = new JLabel("Recent Customers");
         title.setFont(new Font("SansSerif", Font.BOLD, 15));
         JButton viewAll = pillButton("View All");
-        viewAll.addActionListener(e -> {
-            List<Order> sorted = new ArrayList<>(allOrders);
-            sorted.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
-            StringBuilder sb = new StringBuilder();
-            for (Order o : sorted) {
-                sb.append(o.customer).append(" - $").append(String.format("%.2f", o.total))
-                        .append(" - ").append(o.time).append("\n");
-            }
-            String msg = sb.length() == 0 ? "No customers yet." : sb.toString();
-            JOptionPane.showMessageDialog(this, msg, "All Customers", JOptionPane.INFORMATION_MESSAGE);
-        });
+        viewAll.addActionListener(e -> showAllCustomersWindow());
         header.add(title, BorderLayout.WEST);
         header.add(viewAll, BorderLayout.EAST);
 
