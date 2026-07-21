@@ -13,6 +13,10 @@ import java.awt.event.FocusEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.GeneralPath;
+import java.awt.print.PageFormat;
+import java.awt.print.Printable;
+import java.awt.print.PrinterException;
+import java.awt.print.PrinterJob;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -838,6 +842,9 @@ public class Dasboard extends JFrame {
         updateDateButtonText();
 
         refreshEverything();
+
+        // Show a printable receipt for the order that was just entered.
+        showReceiptDialog(order);
     }
 
     /** Right-click menu on an order row: Admin gets Edit/Delete, Staff sees a locked notice. */
@@ -923,6 +930,70 @@ public class Dasboard extends JFrame {
 
         allOrders.removeIf(o -> o.orderId.equals(orderId));
         refreshEverything();
+    }
+
+    // ---------------- RECEIPT WINDOW ----------------
+    /**
+     * Shows a small printable receipt window right after an order is saved. It is intentionally
+     * smaller than the "All Products" / "All Orders" windows, and never touches allOrders /
+     * the database itself - the order is already saved by the time this is shown, so closing
+     * or printing this window has no effect on what's stored in "View All Orders".
+     */
+    private void showReceiptDialog(Order order) {
+        JDialog dialog = new JDialog(this, "Receipt", true);
+        dialog.setSize(360, 560);
+        dialog.setLocationRelativeTo(this);
+        dialog.getContentPane().setBackground(BG);
+        dialog.setLayout(new BorderLayout());
+
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.setBackground(BG);
+        wrapper.setBorder(new EmptyBorder(18, 18, 18, 18));
+
+        RoundedPanel card = new RoundedPanel(16, CARD_BG);
+        card.setLayout(new BorderLayout());
+        card.setBorder(new EmptyBorder(16, 20, 16, 20));
+
+        ReceiptPanel receiptPanel = new ReceiptPanel(order);
+
+        JScrollPane scroll = new JScrollPane(receiptPanel);
+        scroll.setBorder(null);
+        scroll.setOpaque(false);
+        scroll.getViewport().setOpaque(false);
+        scroll.getVerticalScrollBar().setUnitIncrement(12);
+
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 12));
+        buttons.setOpaque(false);
+
+        JButton printBtn = pillButton("\uD83D\uDDA8 Print Receipt");
+        printBtn.addActionListener(e -> printReceipt(receiptPanel));
+
+        JButton closeBtn = pillButton("Close");
+        closeBtn.addActionListener(e -> dialog.dispose());
+
+        buttons.add(printBtn);
+        buttons.add(closeBtn);
+
+        card.add(scroll, BorderLayout.CENTER);
+        card.add(buttons, BorderLayout.SOUTH);
+        wrapper.add(card, BorderLayout.CENTER);
+        dialog.add(wrapper, BorderLayout.CENTER);
+
+        dialog.setVisible(true);
+    }
+
+    /** Sends the receipt panel straight to the default/selected system printer. */
+    private void printReceipt(ReceiptPanel receiptPanel) {
+        PrinterJob job = PrinterJob.getPrinterJob();
+        job.setPrintable(receiptPanel);
+        if (job.printDialog()) {
+            try {
+                job.print();
+            } catch (PrinterException ex) {
+                JOptionPane.showMessageDialog(this, "Could not print the receipt:\n" + ex.getMessage(),
+                        "Print Error", JOptionPane.ERROR_MESSAGE);
+            }
+        }
     }
 
     // ---------------- ALL ORDERS WINDOW ----------------
@@ -1805,6 +1876,174 @@ public class Dasboard extends JFrame {
                 lbl.setForeground(ORANGE);
             }
             return lbl;
+        }
+    }
+
+    /**
+     * A single printable receipt for one order: cafe logo + name, order details, the product
+     * line with price, date/time, and a thank-you footer. Implements Printable so it can be
+     * sent straight to the system print dialog from the "Print Receipt" button.
+     */
+    static class ReceiptPanel extends JPanel implements Printable {
+        private static final int RECEIPT_WIDTH = 280;
+
+        ReceiptPanel(Order order) {
+            setBackground(CARD_BG);
+            setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+            setBorder(new EmptyBorder(6, 10, 10, 10));
+            setAlignmentX(Component.CENTER_ALIGNMENT);
+
+            // ---- Cafe logo ----
+            try {
+                ImageIcon icon = new ImageIcon("image/BenCafeLogo.png");
+                
+                if (icon.getIconWidth() > 0) {
+                    Image scaled = icon.getImage().getScaledInstance(64, 64, Image.SCALE_SMOOTH);
+                    JLabel logoLbl = new JLabel(new ImageIcon(scaled));
+                    logoLbl.setAlignmentX(Component.CENTER_ALIGNMENT);
+                    add(logoLbl);
+                    add(Box.createRigidArea(new Dimension(0, 6)));
+                }
+            } catch (Exception ignored) {
+                // No logo file found - the receipt still works fine without it.
+            }
+
+            // ---- Cafe name ----
+            JLabel name = new JLabel("Ben Cafe");
+            name.setFont(new Font("SansSerif", Font.BOLD, 19));
+            name.setForeground(TEXT_DARK);
+            name.setAlignmentX(Component.CENTER_ALIGNMENT);
+            add(name);
+
+            JLabel tagline = new JLabel("Order Receipt");
+            tagline.setFont(new Font("SansSerif", Font.ITALIC, 11));
+            tagline.setForeground(TEXT_GRAY);
+            tagline.setAlignmentX(Component.CENTER_ALIGNMENT);
+            add(tagline);
+
+            add(Box.createRigidArea(new Dimension(0, 10)));
+            add(dashedLine());
+            add(Box.createRigidArea(new Dimension(0, 8)));
+
+            addRow("Order ID:", order.orderId);
+            addRow("Customer:", order.customer);
+            addRow("Date:", order.date.format(DateTimeFormatter.ofPattern("MMM d, yyyy")));
+            addRow("Time:", order.time);
+            addRow("Status:", order.status);
+
+            add(Box.createRigidArea(new Dimension(0, 8)));
+            add(dashedLine());
+            add(Box.createRigidArea(new Dimension(0, 8)));
+
+            JLabel itemHeader = new JLabel("Item");
+            itemHeader.setFont(new Font("SansSerif", Font.BOLD, 12));
+            itemHeader.setForeground(TEXT_GRAY);
+            itemHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+            add(itemHeader);
+            add(Box.createRigidArea(new Dimension(0, 5)));
+
+            double unitPrice = order.qty > 0 ? order.total / order.qty : 0;
+            addRow(order.product + "  x " + order.qty, String.format("$%.2f", order.total));
+
+            JLabel unitLbl = new JLabel("@ $" + String.format("%.2f", unitPrice) + " each");
+            unitLbl.setFont(new Font("SansSerif", Font.PLAIN, 10));
+            unitLbl.setForeground(TEXT_GRAY);
+            unitLbl.setAlignmentX(Component.LEFT_ALIGNMENT);
+            add(unitLbl);
+
+            add(Box.createRigidArea(new Dimension(0, 10)));
+            add(dashedLine());
+            add(Box.createRigidArea(new Dimension(0, 8)));
+
+            JPanel totalRow = new JPanel(new BorderLayout());
+            totalRow.setOpaque(false);
+            totalRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+            totalRow.setMaximumSize(new Dimension(RECEIPT_WIDTH, 28));
+            JLabel totalLbl = new JLabel("TOTAL");
+            totalLbl.setFont(new Font("SansSerif", Font.BOLD, 15));
+            JLabel totalVal = new JLabel(String.format("$%.2f", order.total));
+            totalVal.setFont(new Font("SansSerif", Font.BOLD, 15));
+            totalVal.setForeground(ACCENT);
+            totalRow.add(totalLbl, BorderLayout.WEST);
+            totalRow.add(totalVal, BorderLayout.EAST);
+            add(totalRow);
+
+            add(Box.createRigidArea(new Dimension(0, 14)));
+            add(dashedLine());
+            add(Box.createRigidArea(new Dimension(0, 12)));
+
+            JLabel thanks = new JLabel("Thank you!");
+            thanks.setFont(new Font("SansSerif", Font.BOLD, 14));
+            thanks.setForeground(TEXT_DARK);
+            thanks.setAlignmentX(Component.CENTER_ALIGNMENT);
+            add(thanks);
+
+            JLabel visitAgain = new JLabel("We hope to see you again soon");
+            visitAgain.setFont(new Font("SansSerif", Font.PLAIN, 11));
+            visitAgain.setForeground(TEXT_GRAY);
+            visitAgain.setAlignmentX(Component.CENTER_ALIGNMENT);
+            add(visitAgain);
+
+            setPreferredSize(new Dimension(RECEIPT_WIDTH, getPreferredLayoutHeightEstimate()));
+        }
+
+        // Rough height estimate so the scroll pane sizes itself sensibly before layout runs.
+       private int getPreferredLayoutHeightEstimate() {
+            return 520;
+       }
+
+       
+       private void addRow(String label, String value) {
+            JPanel row = new JPanel(new BorderLayout());
+            row.setOpaque(false);
+            row.setAlignmentX(Component.LEFT_ALIGNMENT);
+            row.setMaximumSize(new Dimension(RECEIPT_WIDTH, 20));
+            JLabel l = new JLabel(label);
+            l.setFont(new Font("SansSerif", Font.PLAIN, 12));
+            l.setForeground(TEXT_DARK);
+            JLabel v = new JLabel(value);
+            v.setFont(new Font("SansSerif", Font.PLAIN, 12));
+            v.setForeground(TEXT_DARK);
+            row.add(l, BorderLayout.WEST);
+            row.add(v, BorderLayout.EAST);
+            add(row);
+            add(Box.createRigidArea(new Dimension(0, 4)));
+        }
+
+        private DashedLine dashedLine() {
+            DashedLine line = new DashedLine();
+            line.setAlignmentX(Component.LEFT_ALIGNMENT);
+            line.setMaximumSize(new Dimension(RECEIPT_WIDTH, 1));
+            line.setPreferredSize(new Dimension(RECEIPT_WIDTH, 1));
+            return line;
+        }
+
+        @Override
+        public int print(Graphics graphics, PageFormat pageFormat, int pageIndex) throws PrinterException {
+            if (pageIndex > 0) return NO_SUCH_PAGE;
+            Graphics2D g2 = (Graphics2D) graphics;
+            g2.translate(pageFormat.getImageableX(), pageFormat.getImageableY());
+
+            double scale = 1.0;
+            if (getWidth() > pageFormat.getImageableWidth()) {
+                scale = pageFormat.getImageableWidth() / getWidth();
+            }
+            g2.scale(scale, scale);
+
+            print(g2);
+            return PAGE_EXISTS;
+        }
+    }
+
+    /** Thin dashed divider used between receipt sections, styled like a real till receipt. */
+    static class DashedLine extends JComponent {
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setColor(BORDER);
+            g2.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_BEVEL, 0, new float[]{4f, 3f}, 0));
+            int y = getHeight() / 2;
+            g2.drawLine(0, y, getWidth(), y);
+            g2.dispose();
         }
     }
 
